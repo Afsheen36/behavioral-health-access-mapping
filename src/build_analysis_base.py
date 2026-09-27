@@ -16,6 +16,7 @@ GEOGRAPHY_FILE = PROCESSED_DATA_DIR / "county_geography.parquet"
 WORKFORCE_FILE = PROCESSED_DATA_DIR / "county_workforce.parquet"
 ACS_FILE = PROCESSED_DATA_DIR / "county_acs_context.parquet"
 RURALITY_FILE = PROCESSED_DATA_DIR / "county_rurality.parquet"
+FACILITIES_FILE = PROCESSED_DATA_DIR / "county_facilities.parquet"
 
 OUTPUT_FILE = PROCESSED_DATA_DIR / "county_analysis_base.parquet"
 
@@ -23,7 +24,7 @@ OUTPUT_FILE = PROCESSED_DATA_DIR / "county_analysis_base.parquet"
 def main() -> None:
 
     # -----------------------------------------------------
-    # Load processed datasets
+    # Load datasets
     # -----------------------------------------------------
 
     print("Loading county geography...")
@@ -38,13 +39,17 @@ def main() -> None:
     print("Loading USDA rurality...")
     rurality = pd.read_parquet(RURALITY_FILE)
 
+    print("Loading SAMHSA facilities...")
+    facilities = pd.read_parquet(FACILITIES_FILE)
+
     print(f"\nGeography records: {len(geography):,}")
     print(f"Workforce records: {len(workforce):,}")
     print(f"ACS records: {len(acs):,}")
     print(f"Rurality records: {len(rurality):,}")
+    print(f"Facility counties: {len(facilities):,}")
 
     # -----------------------------------------------------
-    # Merge workforce onto validated Census geography
+    # Merge workforce
     # -----------------------------------------------------
 
     merged = geography.merge(
@@ -62,29 +67,10 @@ def main() -> None:
         .to_string()
     )
 
-    unmatched_workforce = merged.loc[
-        merged["workforce_merge"] != "both",
-        ["GEOID", "NAMELSAD", "STUSPS"],
-    ]
-
-    print(
-        "\nGeography records without workforce match:",
-        len(unmatched_workforce),
-    )
-
-    if len(unmatched_workforce) > 0:
-        print(
-            unmatched_workforce.to_string(
-                index=False
-            )
-        )
-
-    merged = merged.drop(
-        columns="workforce_merge"
-    )
+    merged = merged.drop(columns="workforce_merge")
 
     # -----------------------------------------------------
-    # Merge ACS socioeconomic context
+    # Merge ACS context
     # -----------------------------------------------------
 
     merged = merged.merge(
@@ -102,29 +88,10 @@ def main() -> None:
         .to_string()
     )
 
-    unmatched_acs = merged.loc[
-        merged["acs_merge"] != "both",
-        ["GEOID", "NAMELSAD", "STUSPS"],
-    ]
-
-    print(
-        "\nGeography records without ACS match:",
-        len(unmatched_acs),
-    )
-
-    if len(unmatched_acs) > 0:
-        print(
-            unmatched_acs.to_string(
-                index=False
-            )
-        )
-
-    merged = merged.drop(
-        columns="acs_merge"
-    )
+    merged = merged.drop(columns="acs_merge")
 
     # -----------------------------------------------------
-    # Merge USDA rurality
+    # Merge rurality
     # -----------------------------------------------------
 
     merged = merged.merge(
@@ -142,26 +109,44 @@ def main() -> None:
         .to_string()
     )
 
-    unmatched_rurality = merged.loc[
-        merged["rurality_merge"] != "both",
-        ["GEOID", "NAMELSAD", "STUSPS"],
+    merged = merged.drop(columns="rurality_merge")
+
+    # -----------------------------------------------------
+    # Merge SAMHSA facility records
+    # -----------------------------------------------------
+
+    merged = merged.merge(
+        facilities,
+        on="GEOID",
+        how="left",
+        validate="one_to_one",
+        indicator="facility_merge",
+    )
+
+    print("\nFacility merge:")
+    print(
+        merged["facility_merge"]
+        .value_counts()
+        .to_string()
+    )
+
+    # Counties without matched facility records should
+    # represent zero observed matched facility records,
+    # rather than missing values.
+    facility_count_columns = [
+        "facility_records_total",
+        "mental_health_facility_records",
+        "substance_use_facility_records",
     ]
 
-    print(
-        "\nGeography records without RUCC match:",
-        len(unmatched_rurality),
-    )
-
-    if len(unmatched_rurality) > 0:
-        print(
-            unmatched_rurality.to_string(
-                index=False
-            )
+    for column in facility_count_columns:
+        merged[column] = (
+            merged[column]
+            .fillna(0)
+            .astype(int)
         )
 
-    merged = merged.drop(
-        columns="rurality_merge"
-    )
+    merged = merged.drop(columns="facility_merge")
 
     # -----------------------------------------------------
     # Derived psychiatrist workforce rates
@@ -182,6 +167,28 @@ def main() -> None:
     )
 
     # -----------------------------------------------------
+    # Derived facility-record rates
+    # -----------------------------------------------------
+
+    merged["facility_records_per_100k"] = (
+        merged["facility_records_total"]
+        / merged["population_2024"]
+        * 100_000
+    )
+
+    merged["mental_health_facility_records_per_100k"] = (
+        merged["mental_health_facility_records"]
+        / merged["population_2024"]
+        * 100_000
+    )
+
+    merged["substance_use_facility_records_per_100k"] = (
+        merged["substance_use_facility_records"]
+        / merged["population_2024"]
+        * 100_000
+    )
+
+    # -----------------------------------------------------
     # Final quality control
     # -----------------------------------------------------
 
@@ -189,58 +196,52 @@ def main() -> None:
 
     print(
         "Missing population:",
-        merged["population_2024"]
-        .isna()
-        .sum(),
+        merged["population_2024"].isna().sum(),
     )
 
     print(
         "Missing poverty percentage:",
-        merged["poverty_pct_2024"]
-        .isna()
-        .sum(),
+        merged["poverty_pct_2024"].isna().sum(),
     )
 
     print(
         "Missing uninsured percentage:",
-        merged["uninsured_pct_2024"]
-        .isna()
-        .sum(),
+        merged["uninsured_pct_2024"].isna().sum(),
     )
 
     print(
         "Missing median household income:",
-        merged["median_household_income_2024"]
-        .isna()
-        .sum(),
+        merged["median_household_income_2024"].isna().sum(),
     )
 
     print(
         "Missing RUCC:",
-        merged["rucc_2023"]
-        .isna()
-        .sum(),
+        merged["rucc_2023"].isna().sum(),
     )
 
     print(
         "Missing total psychiatrist counts:",
-        merged["psychiatrists_total_2023"]
-        .isna()
-        .sum(),
+        merged["psychiatrists_total_2023"].isna().sum(),
     )
 
     print(
         "Missing psychiatrist rate:",
-        merged["psychiatrists_per_100k_2023"]
-        .isna()
-        .sum(),
+        merged["psychiatrists_per_100k_2023"].isna().sum(),
     )
 
     print(
         "Counties with zero total psychiatrists:",
-        (
-            merged["psychiatrists_total_2023"] == 0
-        ).sum(),
+        (merged["psychiatrists_total_2023"] == 0).sum(),
+    )
+
+    print(
+        "Counties with zero matched facility records:",
+        (merged["facility_records_total"] == 0).sum(),
+    )
+
+    print(
+        "Counties with >=1 matched facility record:",
+        (merged["facility_records_total"] > 0).sum(),
     )
 
     print("\nMetro/nonmetro distribution:")
@@ -274,8 +275,8 @@ def main() -> None:
     print(f"Saved: {OUTPUT_FILE}")
 
     print(
-        "Geography + workforce + ACS + rurality "
-        "integration completed successfully."
+        "Geography + workforce + ACS + rurality + "
+        "facility integration completed successfully."
     )
 
 
