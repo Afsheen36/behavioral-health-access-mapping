@@ -10,6 +10,7 @@ PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 
 GEOGRAPHY_FILE = PROCESSED_DATA_DIR / "county_geography.parquet"
 WORKFORCE_FILE = PROCESSED_DATA_DIR / "county_workforce.parquet"
+ACS_FILE = PROCESSED_DATA_DIR / "county_acs_context.parquet"
 
 OUTPUT_FILE = PROCESSED_DATA_DIR / "county_analysis_base.parquet"
 
@@ -22,11 +23,15 @@ def main() -> None:
     print("Loading AHRF workforce...")
     workforce = pd.read_parquet(WORKFORCE_FILE)
 
-    print(f"Geography records: {len(geography):,}")
+    print("Loading ACS context...")
+    acs = pd.read_parquet(ACS_FILE)
+
+    print(f"\nGeography records: {len(geography):,}")
     print(f"Workforce records: {len(workforce):,}")
+    print(f"ACS records: {len(acs):,}")
 
     # -----------------------------------------------------
-    # Merge workforce onto the validated Census geography
+    # Merge workforce onto validated Census geography
     # -----------------------------------------------------
 
     merged = geography.merge(
@@ -34,36 +39,77 @@ def main() -> None:
         on="GEOID",
         how="left",
         validate="one_to_one",
-        indicator=True,
+        indicator="workforce_merge",
     )
 
+    print("\nWorkforce merge:")
+    print(merged["workforce_merge"].value_counts().to_string())
+
+    merged = merged.drop(columns="workforce_merge")
+
     # -----------------------------------------------------
-    # Merge quality control
+    # Merge ACS context
     # -----------------------------------------------------
 
-    print("\nMerge results:")
-    print(merged["_merge"].value_counts().to_string())
+    merged = merged.merge(
+        acs,
+        on="GEOID",
+        how="left",
+        validate="one_to_one",
+        indicator="acs_merge",
+    )
 
-    unmatched = merged.loc[
-        merged["_merge"] != "both",
+    print("\nACS merge:")
+    print(merged["acs_merge"].value_counts().to_string())
+
+    unmatched_acs = merged.loc[
+        merged["acs_merge"] != "both",
         ["GEOID", "NAMELSAD", "STUSPS"],
     ]
 
-    print(f"\nGeography records without AHRF match: {len(unmatched):,}")
+    print(
+        f"\nGeography records without ACS match: "
+        f"{len(unmatched_acs):,}"
+    )
 
-    if len(unmatched) > 0:
-        print(unmatched.to_string(index=False))
+    if len(unmatched_acs) > 0:
+        print(unmatched_acs.to_string(index=False))
 
-    merged = merged.drop(columns="_merge")
+    merged = merged.drop(columns="acs_merge")
+
+    # -----------------------------------------------------
+    # Derived workforce rates
+    # -----------------------------------------------------
+
+    merged["psychiatrists_per_100k_2023"] = (
+        merged["psychiatrists_total_2023"]
+        / merged["population_2024"]
+        * 100_000
+    )
+
+    merged["md_patient_care_psychiatrists_per_100k_2023"] = (
+        merged["psychiatrists_md_patient_care_2023"]
+        / merged["population_2024"]
+        * 100_000
+    )
+
+    # -----------------------------------------------------
+    # Quality control
+    # -----------------------------------------------------
 
     print(
-        "\nMissing total psychiatrist counts after merge:",
+        "\nMissing population after merge:",
+        merged["population_2024"].isna().sum(),
+    )
+
+    print(
+        "Missing total psychiatrist counts:",
         merged["psychiatrists_total_2023"].isna().sum(),
     )
 
     print(
-        "Missing patient-care psychiatrist counts after merge:",
-        merged["psychiatrists_md_patient_care_2023"].isna().sum(),
+        "Missing psychiatrist rate:",
+        merged["psychiatrists_per_100k_2023"].isna().sum(),
     )
 
     print(
@@ -71,7 +117,6 @@ def main() -> None:
         (merged["psychiatrists_total_2023"] == 0).sum(),
     )
 
-    # Basic safeguards
     assert len(merged) == len(geography)
     assert merged["GEOID"].is_unique
 
@@ -82,7 +127,10 @@ def main() -> None:
 
     print(f"\nFinal analysis-base records: {len(merged):,}")
     print(f"Saved: {OUTPUT_FILE}")
-    print("Geography + workforce integration completed successfully.")
+    print(
+        "Geography + workforce + ACS integration "
+        "completed successfully."
+    )
 
 
 if __name__ == "__main__":
